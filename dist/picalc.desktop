@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Picalc
+GenericName=Calculator
+Comment=Desktop calculator built with GPUI Kit
+Exec=picalc %f
+TryExec=picalc
+Icon=picalc
+Terminal=false
+StartupNotify=true
+Categories=Utility;Calculator;
+Keywords=calculator;math;arithmetic;percent;
+StartupWMClass=picalc
