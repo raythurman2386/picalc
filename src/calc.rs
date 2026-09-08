@@ -436,8 +436,14 @@ pub fn evaluate_tokens(tokens: &[String]) -> Option<f64> {
     }
 }
 
+/// Digits after the decimal in fixed/scientific forms. Fifteen significant
+/// digits still govern magnitude and integer fidelity; this only trims long
+/// fractional expansions (e.g. 59 ÷ 3) so they stay readable on the face.
+const MAX_FRACTIONAL_DIGITS: usize = 10;
+
 /// Format a number for the display like Qt's `QString::number(value, 'g',
-/// 15)`: fifteen significant digits keeps binary-float noise like
+/// 15)`, with fractional digits capped at [`MAX_FRACTIONAL_DIGITS`]:
+/// fifteen significant digits keeps binary-float noise like
 /// 0.1 + 0.2 = 0.30000000000000004 out of the display while showing every
 /// integer the 15-digit entry limit can produce exactly; larger magnitudes
 /// fall back to scientific notation. Trailing zeros are stripped and
@@ -456,7 +462,7 @@ pub fn format_number(value: f64) -> String {
         .expect("exponent digits");
 
     if !(-4..15).contains(&exp) {
-        let scientific = format!("{value:.14e}");
+        let scientific = format!("{value:.MAX_FRACTIONAL_DIGITS$e}");
         let split = scientific.rfind('e').expect("scientific form");
         let (mantissa, exponent) = scientific.split_at(split);
         let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
@@ -472,7 +478,7 @@ pub fn format_number(value: f64) -> String {
             format!("{mantissa}e{sign}{digits}")
         }
     } else {
-        let precision = (14 - exp).max(0) as usize;
+        let precision = ((14 - exp).max(0) as usize).min(MAX_FRACTIONAL_DIGITS);
         let fixed = format!("{value:.precision$}");
         if fixed.contains('.') {
             fixed
@@ -755,6 +761,11 @@ mod tests {
         assert_eq!(format_number(0.0001), "0.0001");
         assert_eq!(format_number(0.5), "0.5");
         assert_eq!(format_number(99999999999999.0), "99999999999999");
+
+        // Repeating decimals are capped so they stay on the result line.
+        assert_eq!(format_number(59.0 / 3.0), "19.6666666667");
+        assert_eq!(format_number(1.0 / 3.0), "0.3333333333");
+        assert_eq!(run("5 9 ÷ 3 ="), "19.6666666667");
     }
 
     #[test]

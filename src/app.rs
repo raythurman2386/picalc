@@ -1,5 +1,7 @@
 use std::borrow::Cow;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui_kit::component::{h_flex, v_flex, window_paddings, ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -120,18 +122,20 @@ fn window_options() -> WindowOptions {
     }
 }
 
-/// A notify watcher on the Omarchy theme paths, drained on each frame so a
-/// theme switch re-tints the calculator live.
+/// A notify watcher on the Omarchy theme paths. Omarchy replaces
+/// `current/theme` with `rm -rf` + `mv`, which drops inotify watches, so
+/// the poll loop rearms whenever a watched path disappears.
 struct ThemeWatch {
-    events: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
-    _watcher: Option<RecommendedWatcher>,
+    events: Arc<Mutex<Vec<PathBuf>>>,
+    watcher: Option<RecommendedWatcher>,
+    watched: Vec<PathBuf>,
 }
 
 impl ThemeWatch {
     fn new() -> Self {
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
         let tx = events.clone();
-        let mut watcher = RecommendedWatcher::new(
+        let watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
                 if let Ok(event) = res {
                     if matches!(
@@ -147,24 +151,52 @@ impl ThemeWatch {
             notify::Config::default(),
         )
         .ok();
-        if let Some(watcher) = watcher.as_mut() {
-            for path in omarchy_watch_paths() {
-                if path.exists() {
-                    let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
-                }
-            }
-        }
-        Self {
+        let mut this = Self {
             events,
-            _watcher: watcher,
+            watcher,
+            watched: Vec::new(),
+        };
+        this.watch_all(omarchy_watch_paths());
+        this
+    }
+
+    fn watch_all(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.unwatch_all();
+        for path in paths {
+            self.watch_path(&path);
         }
     }
 
-    fn drain(&self) -> Vec<std::path::PathBuf> {
+    fn watch_path(&mut self, path: &Path) {
+        if !path.exists() || self.watched.iter().any(|p| p == path) {
+            return;
+        }
+        if let Some(watcher) = self.watcher.as_mut() {
+            if watcher.watch(path, RecursiveMode::NonRecursive).is_ok() {
+                self.watched.push(path.to_path_buf());
+            }
+        }
+    }
+
+    fn unwatch_all(&mut self) {
+        if let Some(watcher) = self.watcher.as_mut() {
+            for path in self.watched.drain(..) {
+                let _ = watcher.unwatch(&path);
+            }
+        } else {
+            self.watched.clear();
+        }
+    }
+
+    fn drain(&self) -> Vec<PathBuf> {
         self.events
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    fn needs_rearm(&self) -> bool {
+        self.watched.iter().any(|path| !path.exists())
     }
 }
 
@@ -330,8 +362,9 @@ pub struct Picalc {
     text_scale: f32,
     fit_scale: f32,
     theme_watch: ThemeWatch,
-    last_theme_check: Instant,
     focus_handle: FocusHandle,
+    _appearance_sub: Subscription,
+    _poll_task: Task<()>,
 }
 
 impl Focusable for Picalc {
@@ -350,18 +383,42 @@ impl Picalc {
         apply_palette(&palette, Some(window), cx);
         window.set_window_title("Picalc");
 
+        let (appearance_sub, poll_task) = Self::start_theme_poll(window, cx);
+
         let this = Self {
             calculator: Calculator::new(),
             palette,
             text_scale,
             fit_scale: Self::compute_fit_scale(window),
             theme_watch: ThemeWatch::new(),
-            last_theme_check: Instant::now(),
             focus_handle,
+            _appearance_sub: appearance_sub,
+            _poll_task: poll_task,
         };
         let handle = this.focus_handle.clone();
         window.focus(&handle, cx);
         this
+    }
+
+    /// Poll theme/scale on a timer and on window-appearance changes so an
+    /// unfocused calculator still re-tints when Omarchy or the desktop
+    /// switches light/dark — matching piwrite's live theme follow.
+    fn start_theme_poll(window: &mut Window, cx: &mut Context<Self>) -> (Subscription, Task<()>) {
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            this.poll_theme(window, cx);
+        });
+        let poll = cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            if this
+                .update_in(cx, |this, window, cx| this.poll_theme(window, cx))
+                .is_err()
+            {
+                break;
+            }
+        });
+        (appearance, poll)
     }
 
     /// The one engine input entry the keypad buttons, the keyboard
@@ -386,21 +443,24 @@ impl Picalc {
         }
     }
 
-    /// Re-check the Omarchy theme when the watcher fires (or the desktop
-    /// text scale changes) so the face re-tints live.
+    /// Re-check Omarchy colors, system light/dark, and text scale. Always
+    /// re-reads `detect_system_dark` so a desktop mode flip is not stuck on
+    /// the previous palette's dark hint.
     fn poll_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.last_theme_check.elapsed() <= Duration::from_millis(400) {
-            return;
+        let events = self.theme_watch.drain();
+        // Omarchy replaces `current/theme` with `rm -rf` + `mv`, which
+        // invalidates inotify watches on that directory and colors.toml.
+        if !events.is_empty() || self.theme_watch.needs_rearm() {
+            self.theme_watch.watch_all(omarchy_watch_paths());
         }
-        self.last_theme_check = Instant::now();
-        if !self.theme_watch.drain().is_empty() {
-            let palette = OmarchyPalette::load(self.palette.dark);
-            if palette != self.palette {
-                self.palette = palette;
-                apply_palette(&self.palette, Some(window), cx);
-                cx.notify();
-            }
+
+        let palette = OmarchyPalette::load(detect_system_dark());
+        if palette != self.palette {
+            self.palette = palette;
+            apply_palette(&self.palette, Some(window), cx);
+            cx.notify();
         }
+
         let scale = detect_text_scale();
         if (scale - self.text_scale).abs() > f32::EPSILON {
             self.text_scale = scale;
@@ -580,6 +640,7 @@ impl Picalc {
         let expression = self.calculator.expression();
         let display = self.calculator.display();
         let is_error = self.calculator.is_errored();
+        let result_size = self.scaled(result_font_size_design(display.chars().count()));
 
         v_flex()
             .id("display")
@@ -594,6 +655,10 @@ impl Picalc {
                     .w_full()
                     .text_size(self.scaled(21.))
                     .text_color(muted)
+                    .whitespace_nowrap()
+                    // Horizontal only: full overflow_hidden clipped the result
+                    // glyph (iA Writer Mono's box is ~1.3em vs line_height 1.1).
+                    .overflow_x_hidden()
                     .child(expression),
             )
             .child(
@@ -602,20 +667,36 @@ impl Picalc {
                     .w_full()
                     .flex()
                     .justify_end()
-                    .text_size(self.scaled(56.))
+                    .text_size(result_size)
                     .line_height(relative(1.1))
                     .text_color(if is_error { muted } else { ink })
+                    .whitespace_nowrap()
+                    .overflow_x_hidden()
                     .child(display),
             )
     }
 }
 
+/// Design-pixel font size for the result line. iA Writer Mono advances at
+/// 0.6em, and the face content is 360 design px wide (400 − 20 pad × 2), so
+/// long results shrink from the 56px base instead of spilling off-screen.
+fn result_font_size_design(char_count: usize) -> f32 {
+    const BASE: f32 = 56.0;
+    const MIN: f32 = 24.0;
+    const CONTENT_WIDTH: f32 = 360.0;
+    const CHAR_EM: f32 = 0.6;
+
+    let chars = char_count.max(1) as f32;
+    let fits = CONTENT_WIDTH / (chars * CHAR_EM);
+    fits.clamp(MIN, BASE)
+}
+
 impl Render for Picalc {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_theme(window, cx);
-
         // Re-fit on every render: renders happen on resize, and the face
         // must shrink with the window when the compositor tiles it small.
+        // Theme polling lives in start_theme_poll, not here, so unfocused
+        // windows still re-tint.
         let fit_scale = Self::compute_fit_scale(window);
         if (fit_scale - self.fit_scale).abs() > f32::EPSILON {
             self.fit_scale = fit_scale;
@@ -751,5 +832,29 @@ fn mix_colors(base: Hsla, tint: Hsla, amount: f32) -> Hsla {
         s: tint.s,
         l: base.l + (tint.l - base.l) * amount,
         a: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::result_font_size_design;
+
+    #[test]
+    fn result_font_keeps_base_for_short_strings() {
+        assert!((result_font_size_design(1) - 56.0).abs() < f32::EPSILON);
+        assert!((result_font_size_design(10) - 56.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn result_font_shrinks_to_fit_long_strings() {
+        // 59÷3 formats to 13 chars; mono width must equal the content box.
+        let size = result_font_size_design(13);
+        assert!(size < 56.0);
+        assert!((size * 13.0 * 0.6 - 360.0).abs() < 0.01);
+
+        // Fifteen-digit integers still fit by shrinking, never below the floor.
+        let size = result_font_size_design(15);
+        assert!((size * 15.0 * 0.6 - 360.0).abs() < 0.01);
+        assert!(result_font_size_design(40) >= 24.0);
     }
 }
