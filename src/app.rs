@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Root, Theme, ThemeMode};
+use gpui_kit::component::{h_flex, v_flex, window_paddings, ActiveTheme, Root, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -103,7 +103,11 @@ fn window_options() -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(120.), px(120.)),
-            size: size(px(400.), px(568.)),
+            // 573 design + 42 client-side chrome (shadow + border per side).
+            // The chrome is drawn INSIDE the viewport, so requesting the bare
+            // design height leaves the face short and clips the expression
+            // line off the top of the window.
+            size: size(px(400.), px(615.)),
         })),
         window_min_size: Some(size(px(340.), px(500.))),
         titlebar: Some(TitlebarOptions {
@@ -488,10 +492,17 @@ impl Picalc {
 
     /// The design is laid out at 400x573 logical pixels; compute how much
     /// of it fits the current viewport, clamped so it never grows past 1.
+    /// The basis is the area inside the client-side window chrome (shadow +
+    /// border), which the Root wrapper draws INSIDE the viewport on Linux.
+    /// Basing the fit on the raw viewport makes the face column overflow by
+    /// the chrome height, clipping the expression line off the window top.
     fn compute_fit_scale(window: &Window) -> f32 {
         let viewport = window.viewport_size();
-        let height_fit = (viewport.height / px(573.)).min(1.0);
-        let width_fit = (viewport.width / px(400.)).min(1.0);
+        let pads = window_paddings(window);
+        let inner_height = viewport.height - pads.top - pads.bottom;
+        let inner_width = viewport.width - pads.left - pads.right;
+        let height_fit = (inner_height / px(573.)).min(1.0);
+        let width_fit = (inner_width / px(400.)).min(1.0);
         height_fit.min(width_fit)
     }
 
