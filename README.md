@@ -14,6 +14,14 @@ User-local install (binary, icon, launcher). No root:
 
 That puts `picalc` on `~/.local/bin` and a desktop entry in the app launcher. Uninstall with `./scripts/uninstall.sh`.
 
+Or install straight from a tagged release without cloning:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/raythurman2386/picalc/main/scripts/netinstall.sh | bash
+```
+
+The netinstaller resolves the latest `v*` release, verifies its `checksums.txt` against a pinned Ed25519 public key (fail closed — no signature or a bad one refuses the install), checks the tarball's SHA-256, then installs into `~/.local` (override with `--prefix DIR`, or a version argument: `... | bash -s -- 0.1.2`).
+
 Tagged releases (`v*`) build a Linux x86_64 tarball on GitHub Actions. Unpack it and run `./install.sh` inside.
 
 ## Run from source
