@@ -1,67 +1,105 @@
 # Picalc
 
-A desktop calculator built with [GPUI Kit](https://github.com/longbridge/gpui-kit), ported from omacalc's interaction model: the same keypad, the same percent and chaining semantics, and the same Qt-style number formatting.
+A calculator for the [pi suite](https://github.com/raythurman2386), built with
+[GPUI Kit](https://github.com/longbridge/gpui-kit) — a small, native,
+theme-following desktop calculator written for Raspberry Pi 5-class hardware
+(and happy on any Linux desktop). Ported from omacalc's interaction model: the
+same keypad, the same percent and chaining semantics, and the same Qt-style
+number formatting.
 
-The whole calculation engine is pure Rust with no UI imports, so every interaction — keypad clicks, keyboard bindings, chained results, error recovery — is covered by unit tests.
+## Features
+
+- **Keypad and keyboard drive the same engine** — click or type; chained
+  results, editing, and error recovery behave identically either way.
+- **iOS-style percent**: with a pending `+` or `−`, `x%` means x percent of
+  the running total (`200 + 10 % =` gives `220`); with `×` or `÷` (or
+  standalone) it is `x ÷ 100`.
+- **Exact chaining**: after `=`, the next operation continues from the exact
+  stored result, not the rounded display, so `1 ÷ 3 = × 3 =` comes back as
+  `1`.
+- **Qt-style formatting**: fifteen significant digits
+  (`QString::number(value, 'g', 15)`) keep binary-float noise out of the
+  display; larger magnitudes fall back to scientific notation. Entries cap at
+  fifteen digits.
+- **Forgiving errors**: division by zero shows `Error`, and the next digit
+  recovers without an explicit clear. Sign with nothing typed starts a fresh
+  negative operand, so `4 + ± 2` enters `4 + (−2)`, not `−42`.
+- **Aesthetic**: keyboard-first, follows the desktop dark/light mode and text
+  scale, and live re-tints from the Omarchy theme palette.
+
+The calculation engine is pure Rust with no UI imports, so every interaction —
+keypad clicks, keyboard bindings, chained results, error recovery — is covered
+by unit tests (30 across the suite).
 
 ## Install
 
-User-local install (binary, icon, launcher). No root:
-
-```sh
-./scripts/install.sh
-```
-
-That puts `picalc` on `~/.local/bin` and a desktop entry in the app launcher. Uninstall with `./scripts/uninstall.sh`.
-
-Or install straight from a tagged release without cloning:
+User-local install from a tagged release (no root, Ed25519-verified,
+fail-closed):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/raythurman2386/picalc/main/scripts/netinstall.sh | bash
 ```
 
-The netinstaller resolves the latest `v*` release, verifies its `checksums.txt` against a pinned Ed25519 public key (fail closed — no signature or a bad one refuses the install), checks the tarball's SHA-256, then installs into `~/.local` (override with `--prefix DIR`, or a version argument: `... | bash -s -- 0.1.2`).
-
-Tagged releases (`v*`) build Linux tarballs on GitHub Actions for x86_64 and aarch64 (Raspberry Pi 5 and other 64-bit ARM boards), each requiring glibc 2.39+ (Debian 13, Ubuntu 24.04, current Raspberry Pi OS). Unpack the one for your machine and run `./install.sh` inside.
-
-## Release signing
-
-Every release's `checksums.txt` is signed with an Ed25519 key, so an installer can prove the checksums (and therefore the tarball) came from this repo:
-
-- `bash scripts/gen-signing-key.sh` generates the keypair into `~/.picalc/signing` — the secret key stays offline forever and is never committed, used in CI, or uploaded. Only the public key is committed (`picalc-signing-key.pub`) and pinned in the installers.
-- `bash scripts/sign-release.sh CHECKSUMS_FILE SECRET_KEY` signs one file; `scripts/sign-releases.sh VERSION...` batch-signs published releases offline into `~/.picalc/signing/releases/<version>/`; `scripts/upload-release-sigs.sh VERSION...` attaches each `checksums.txt.sig` back to its release with `gh release upload --clobber`.
-
-Verification on the installer side is fail-closed: a release without a signature, or whose signature does not verify against the pinned public key, is refused.
-
-## Run from source
+Or build and install from source:
 
 ```sh
-cargo run --release
+cargo build --release
+./scripts/install.sh
 ```
+
+Uninstall with `./scripts/uninstall.sh`. The netinstaller accepts a `--prefix`
+directory, an optional version argument, and `--force`; the source install
+honors `PREFIX=DIR`.
+
+Tagged `v*` releases also build x86_64 + aarch64 tarballs on GitHub Actions
+(glibc 2.39+ — e.g. Raspberry Pi OS / Debian 13). Unpack the one for your
+architecture and run `./install.sh` inside.
+
+Releases are authenticated with Ed25519 signatures over `checksums.txt`; the
+public key is committed as `picalc-signing-key.pub` and pinned in the
+installer, which refuses anything it cannot verify.
 
 ## Keyboard
 
-The keypad and the keyboard drive the same engine:
+| Keys | Action |
+|---|---|
+| `0`–`9` | Digits; `.` or `,` the decimal point |
+| `+` `-` `*` `/` | Operators; `%` percent |
+| `=` / `enter` | Evaluate |
+| `Backspace` / `Delete` | Edit the entry |
+| `c` / `Esc` | Clear · `s` toggle sign |
+| `Ctrl+C` / `Super+C` | Copy the result |
+| `Ctrl+V` / `Super+V` | Paste a number |
+| `Ctrl+Q` | Quit |
 
-- `0`–`9` type digits; `.` or `,` the decimal point.
-- `+` `-` `*` `/` operators; `%` percent; `=` or `Enter` evaluates.
-- `Backspace`/`Delete` edit, `C`/`Esc` clears, `S` toggles the sign.
-- `Ctrl+C` / `Super+C` copies the result; `Ctrl+V` / `Super+V` pastes a number.
-- `Ctrl+Q` quits.
+## State and theming
 
-## Behavior notes
-
-- Percent is iOS-style: with a pending `+` or `−`, `x%` means x percent of the running total (`200 + 10 % =` gives `220`); with `×` or `÷` (or standalone) it is `x ÷ 100`.
-- Chaining after `=` continues from the exact stored result, not the rounded display, so `1 ÷ 3 = × 3 =` comes back as `1`.
-- Numbers show fifteen significant digits, Qt's `QString::number(value, 'g', 15)` style: binary-float noise stays out of the display and larger magnitudes fall back to scientific notation.
-- Division by zero shows `Error`; any digit recovers without an explicit clear.
-- Sign with nothing typed starts a fresh negative operand, so `4 + ± 2` enters `4 + (−2)`, not `−42`.
-- Entries cap at fifteen digits, and editing after `=` picks up the result's digits.
-
-Text follows the desktop text size (`gsettings` `text-scaling-factor`). The default scale of `1.0` is the size the layout is designed around.
-
-Colors come from `~/.local/state/omarchy/current/theme/colors.toml` when present, following system dark/light mode and re-tinting live on a theme switch.
+Colors follow the desktop theme —
+`~/.local/state/omarchy/current/theme/colors.toml` when present — re-tinting
+live on theme switches; text follows the desktop text scale
+(`gsettings` `text-scaling-factor`). The default scale of `1.0` is the size
+the layout is designed around.
 
 ## Fonts
 
-The iA Writer Mono font is bundled under the SIL Open Font License 1.1; see `fonts/OFL.txt`. The font is copyright Information Architects Inc. and based on IBM Plex, copyright IBM Corp.
+The iA Writer Mono font is bundled under the SIL Open Font License 1.1; see
+`fonts/OFL.txt`. The font is copyright Information Architects Inc. and based
+on IBM Plex, copyright IBM Corp.
+
+## Development
+
+```sh
+cargo fmt --check          # formatting
+cargo clippy --all-targets -- -D warnings
+cargo test                 # 30 tests
+cargo run --release        # calculate
+```
+
+CI runs fmt, clippy, and tests on every push; tagged `v*` releases build
+x86_64 + aarch64 tarballs (glibc 2.39+) with an install smoke test, and the
+netinstall integrity harness can be run locally with
+`bash scripts/test-netinstall.sh`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Bundled fonts: SIL OFL 1.1 (see above).
